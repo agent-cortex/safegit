@@ -1,0 +1,48 @@
+{
+  "name": "safegit",
+  "version": "0.1.0",
+  "description": "Safe-backed Git approval CLI, API, and GitHub required-check workflow",
+  "type": "module",
+  "license": "MIT",
+  "author": "Megabyte",
+  "homepage": "https://agent-cortex.github.io/safegit-site/",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/agent-cortex/safegit.git"
+  },
+  "bugs": {
+    "url": "https://github.com/agent-cortex/safegit/issues"
+  },
+  "keywords": [
+    "safe",
+    "multisig",
+    "git",
+    "github-actions",
+    "eip-712",
+    "erc-1271",
+    "viem"
+  ],
+  "packageManager": "pnpm@11.1.2",
+  "engines": {
+    "pnpm": ">=11.1.2"
+  },
+  "bin": {
+    "safegit": "./bin/safegit.js",
+    "safegit-server": "./bin/safegit-server.js"
+  },
+  "scripts": {
+    "preinstall": "node ./scripts/only-pnpm.js",
+    "test": "node --test",
+    "start": "node ./bin/safegit.js",
+    "server": "node ./bin/safegit-server.js"
+  },
+  "dependencies": {
+    "commander": "^12.1.0",
+    "cors": "^2.8.6",
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1",
+    "pg": "^8.13.1",
+    "viem": "^2.49.3",
+    "yaml": "^2.6.1"
+  }
+}

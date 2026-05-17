@@ -1,0 +1,30 @@
+name: Safe Verified
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  safe-verified:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # Replace this with pnpm add --global safegit after publishing.
+      - name: Install SafeGit from repo path
+        run: |
+          corepack enable
+          corepack pnpm --dir ./safegit install --prod --frozen-lockfile
+
+      - name: Verify Safe approval
+        env:
+          SAFEGIT_DATABASE_URL: ${{ secrets.SAFEGIT_DATABASE_URL }}
+        run: |
+          node ./safegit/bin/safegit.js verify --ref HEAD

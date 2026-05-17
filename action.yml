@@ -1,0 +1,27 @@
+name: SafeGit Verify
+
+description: Verify that HEAD has a SafeGit approval in Postgres.
+
+inputs:
+  database-url:
+    description: Postgres connection string for SafeGit
+    required: true
+  ref:
+    description: Git ref to verify
+    required: false
+    default: HEAD
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@v4
+      with:
+        node-version: 22
+    - shell: bash
+      run: |
+        corepack enable
+        corepack pnpm --dir "$GITHUB_ACTION_PATH" install --prod --frozen-lockfile
+    - shell: bash
+      env:
+        SAFEGIT_DATABASE_URL: ${{ inputs.database-url }}
+      run: node "$GITHUB_ACTION_PATH/bin/safegit.js" verify --ref "${{ inputs.ref }}"
