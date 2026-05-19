@@ -206,6 +206,65 @@ GET  /api/approvals/:approvalId
 POST /api/approvals/:approvalId/signatures
 ```
 
+## Production hardening
+
+SafeGit's approval page is intentionally small, but a public deployment should still sit behind basic controls.
+
+### API bearer token
+
+Set `SAFEGIT_API_TOKEN` to require `Authorization: Bearer <token>` on all `/api/*` routes:
+
+```bash
+export SAFEGIT_API_TOKEN='replace-with-a-long-random-token'
+```
+
+The browser approval page still renders at `/approve/:approvalId`. If API auth is enabled, signers can either paste the token into the page once or open:
+
+```text
+https://safegit.example.com/approve/<approvalId>#token=<token>
+```
+
+Do not put this token in GitHub Actions logs, public issues, or screenshots.
+
+### Rate limits and CORS
+
+By default, `/api/*` routes are limited to 60 requests per minute per IP. Tune with:
+
+```bash
+export SAFEGIT_RATE_LIMIT_WINDOW_MS=60000
+export SAFEGIT_RATE_LIMIT_MAX=60
+```
+
+Lock CORS to your deployed origin instead of `*`:
+
+```bash
+export SAFEGIT_CORS_ORIGIN='https://safegit.example.com'
+```
+
+### Reverse proxy
+
+For production, terminate HTTPS at a reverse proxy such as Caddy, Nginx, Cloudflare Tunnel, Fly, Render, or a platform load balancer. Keep Postgres private, rotate `SAFEGIT_API_TOKEN`, and enable platform-level request logging/rate limits too. If the service is behind one trusted proxy, set:
+
+```bash
+export SAFEGIT_TRUST_PROXY=true
+```
+
+This makes per-IP rate limiting use the forwarded client IP instead of the proxy's IP.
+
+### Live Safe validation
+
+Set `SAFEGIT_RPC_URL` so submitted signatures are checked against live `getOwners()` / `getThreshold()` before they count:
+
+```bash
+export SAFEGIT_RPC_URL='https://ethereum-sepolia-rpc.publicnode.com'
+```
+
+For rigorous historical validation, use an archival RPC and verify owner/threshold state at the relevant chain block for the protected change. The MVP validates current Safe ownership; that is enough for demos and most active approvals, not for backdated forensic guarantees.
+
+### GitHub App roadmap
+
+The MVP uses a GitHub Action required check because it is simple and works today. A future GitHub App should add webhook-triggered check-runs, centralized repo configuration, audit pages, and secretless installation UX.
+
 ## GitHub Actions required check
 
 The repo includes:

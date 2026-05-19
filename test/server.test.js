@@ -130,3 +130,47 @@ test('HTTP API does not persist signatures rejected by live Safe owner validatio
     await new Promise((resolve) => server.close(resolve));
   }
 });
+
+test('HTTP API rate limits noisy clients', async () => {
+  const store = createMemoryStore();
+  const server = await listen(createApp({ store, rateLimit: { windowMs: 60_000, max: 1 } }));
+  try {
+    const first = await fetch(`${baseUrl(server)}/api/approvals/missing`);
+    assert.equal(first.status, 404);
+    const second = await fetch(`${baseUrl(server)}/api/approvals/missing`);
+    assert.equal(second.status, 429);
+    const out = await second.json();
+    assert.equal(out.error, 'rate_limited');
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test('HTTP API can require bearer token auth while approval page still renders', async () => {
+  const safe = '0x0000000000000000000000000000000000000001';
+  const payload = samplePayload(safe);
+  const store = createMemoryStore();
+  await store.upsertRepo({ host: 'github.com', owner: 'megabyte0x', name: 'demo', safeAddress: safe, chainId: 11155111, threshold: 1 });
+  await store.createApprovalRequest({
+    repoSlug: 'github.com/megabyte0x/demo', approvalId: 'appr_http', commitSha: payload.message.commitSha,
+    branch: 'main', payload, messageHash: hashApprovalPayload(payload), expiresAt: payload.message.expiresAt
+  });
+
+  const server = await listen(createApp({ store, apiToken: 'secret-token' }));
+  try {
+    const page = await fetch(`${baseUrl(server)}/approve/appr_http`);
+    assert.equal(page.status, 200);
+    assert.match(await page.text(), /API access token/);
+
+    const rejected = await fetch(`${baseUrl(server)}/api/approvals/appr_http`);
+    assert.equal(rejected.status, 401);
+
+    const accepted = await fetch(`${baseUrl(server)}/api/approvals/appr_http`, {
+      headers: { authorization: 'Bearer secret-token' }
+    });
+    assert.equal(accepted.status, 200);
+    assert.equal((await accepted.json()).approvalId, 'appr_http');
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});

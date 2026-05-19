@@ -23,6 +23,12 @@ services:
     environment:
       SAFEGIT_DATABASE_URL: postgres://safegit:safegit_dev_password@postgres:5432/safegit
       SAFEGIT_PORT: 8787
+      # Production hardening knobs:
+      # SAFEGIT_CORS_ORIGIN: https://safegit.example.com
+      # SAFEGIT_API_TOKEN: replace-with-a-long-random-token
+      # SAFEGIT_TRUST_PROXY: true
+      # SAFEGIT_RATE_LIMIT_WINDOW_MS: 60000
+      # SAFEGIT_RATE_LIMIT_MAX: 60
       # Optional but recommended for live Safe owner/threshold validation:
       # SAFEGIT_RPC_URL: https://ethereum-sepolia-rpc.publicnode.com
     ports:

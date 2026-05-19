@@ -1,11 +1,11 @@
 {
-  "name": "safegit",
+  "name": "safe-git",
   "version": "0.1.0",
   "description": "Safe-backed Git approval CLI, API, and GitHub required-check workflow",
   "type": "module",
   "license": "MIT",
   "author": "Megabyte",
-  "homepage": "https://agent-cortex.github.io/safegit-site/",
+  "homepage": "https://www.fumadocs.dev/docs",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/agent-cortex/safegit.git"
@@ -42,7 +42,13 @@
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
     "pg": "^8.13.1",
-    "viem": "^2.49.3",
+    "viem": "2.48.11",
     "yaml": "^2.6.1"
+  },
+  "pnpm": {
+    "overrides": {
+      "viem@2.48.11>ws": "8.20.1",
+      "isows@1.0.7>ws": "8.20.1"
+    }
   }
 }
