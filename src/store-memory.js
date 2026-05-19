@@ -3,6 +3,13 @@ export function createMemoryStore() {
   const approvals = new Map();
   const signatures = new Map();
 
+  function approvalIdForCommit(repoSlug, commitSha) {
+    for (const [approvalId, request] of approvals.entries()) {
+      if (request.repoSlug === repoSlug && request.commitSha === commitSha) return approvalId;
+    }
+    return null;
+  }
+
   return {
     async upsertRepo({ host, owner, name, safeAddress, chainId, threshold }) {
       const slug = `${host}/${owner}/${name}`;
@@ -15,7 +22,13 @@ export function createMemoryStore() {
       return repos.get(slug) || null;
     },
 
-    async createApprovalRequest({ repoSlug, approvalId, commitSha, branch, payload, messageHash, expiresAt }) {
+    async createApprovalRequest({ repoSlug, approvalId, commitSha, branch, payload, createdAt = payload?.message?.createdAt || new Date().toISOString(), messageHash, expiresAt }) {
+      const existingApprovalId = approvalIdForCommit(repoSlug, commitSha);
+      if (existingApprovalId) {
+        approvals.delete(existingApprovalId);
+        signatures.delete(existingApprovalId);
+      }
+
       const request = {
         repoSlug,
         approvalId,
@@ -25,7 +38,7 @@ export function createMemoryStore() {
         messageHash,
         expiresAt,
         status: 'pending',
-        createdAt: new Date().toISOString(),
+        createdAt,
         signatures: []
       };
       approvals.set(approvalId, request);
@@ -40,12 +53,10 @@ export function createMemoryStore() {
     },
 
     async getApprovalByCommit(repoSlug, commitSha) {
-      for (const request of approvals.values()) {
-        if (request.repoSlug === repoSlug && request.commitSha === commitSha) {
-          return { ...request, signatures: signatures.get(request.approvalId) || [] };
-        }
-      }
-      return null;
+      const approvalId = approvalIdForCommit(repoSlug, commitSha);
+      if (!approvalId) return null;
+      const request = approvals.get(approvalId);
+      return { ...request, signatures: signatures.get(approvalId) || [] };
     },
 
     async addSignature({ approvalId, signer, signature }) {

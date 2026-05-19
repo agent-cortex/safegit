@@ -1,10 +1,8 @@
 import crypto from 'node:crypto';
 import express from 'express';
 import cors from 'cors';
-import { getAddress } from 'viem';
-import { verifyApprovalSignature } from './attestation.js';
-import { fetchSafeOnchainConfig, isSafeOwner } from './safe-chain.js';
 import { renderApprovalPage } from './approval-page.js';
+import { approvalErrorResponse, submitApprovalSignature } from './approval-service.js';
 
 function timingSafeEqualString(a, b) {
   const left = Buffer.from(String(a || ''));
@@ -108,42 +106,17 @@ export function createApp({ store, provider = null, apiToken = process.env.SAFEG
 
   app.post('/api/approvals/:approvalId/signatures', async (req, res, next) => {
     try {
-      const approval = await store.getApproval(req.params.approvalId);
-      if (!approval) return res.status(404).json({ error: 'approval_not_found' });
-      if (approval.status === 'expired' || approval.status === 'rejected') {
-        return res.status(409).json({ error: `approval_${approval.status}` });
-      }
-      if (new Date(approval.expiresAt).getTime() < Date.now()) {
-        return res.status(410).json({ error: 'approval_expired' });
-      }
-
-      const signer = getAddress(req.body?.signer || '');
-      const signature = req.body?.signature;
-      if (!signature || typeof signature !== 'string' || !signature.startsWith('0x')) {
-        return res.status(400).json({ error: 'invalid_signature_format' });
-      }
-
-      const verification = await verifyApprovalSignature({ payload: approval.payload, signer, signature });
-      if (!verification.valid) {
-        return res.status(400).json({ error: 'invalid_signature', reason: verification.reason });
-      }
-
-      const repo = await store.getRepo(approval.repoSlug);
-      if (!repo) return res.status(500).json({ error: 'repo_config_missing' });
-
-      let threshold = repo.threshold;
-      if (provider) {
-        const onchain = await fetchSafeOnchainConfig(provider, repo.safeAddress);
-        if (!isSafeOwner(onchain, verification.recovered)) {
-          return res.status(403).json({ error: 'signer_not_safe_owner', signer: verification.recovered });
-        }
-        threshold = onchain.threshold;
-      }
-
-      await store.addSignature({ approvalId: approval.approvalId, signer: verification.recovered, signature });
-      const updated = await store.markApprovedIfThresholdMet(approval.approvalId, threshold);
-      res.json({ approvalId: updated.approvalId, status: updated.status, threshold, signatures: updated.signatures });
+      const result = await submitApprovalSignature({
+        store,
+        provider,
+        approvalId: req.params.approvalId,
+        signer: req.body?.signer,
+        signature: req.body?.signature
+      });
+      res.json(result);
     } catch (error) {
+      const response = approvalErrorResponse(error);
+      if (response) return res.status(response.status).json(response.body);
       next(error);
     }
   });

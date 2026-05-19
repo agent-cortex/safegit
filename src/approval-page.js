@@ -92,7 +92,8 @@ function showTokenBox() {
 function renderDetails(a) {
   const m = a.payload.message;
   detailsEl.style.display = 'grid';
-  detailsEl.innerHTML = [
+  detailsEl.replaceChildren();
+  for (const [k, v] of [
     ['Repo', m.repoHost + '/' + m.repoOwner + '/' + m.repoName],
     ['Branch', m.branch],
     ['Commit', m.commitSha],
@@ -100,7 +101,13 @@ function renderDetails(a) {
     ['Safe', m.safe],
     ['Status', a.status],
     ['Signatures', String((a.signatures || []).length)]
-  ].map(([k,v]) => '<strong>' + k + '</strong><code>' + String(v) + '</code>').join('');
+  ]) {
+    const label = document.createElement('strong');
+    label.textContent = k;
+    const value = document.createElement('code');
+    value.textContent = String(v);
+    detailsEl.append(label, value);
+  }
   payloadEl.textContent = JSON.stringify(a.payload, null, 2);
 }
 

@@ -49,6 +49,27 @@ test('GET /approve/:approvalId serves wallet signing UI', async () => {
   }
 });
 
+test('approval page renders API-derived details without innerHTML', async () => {
+  const payload = samplePayload();
+  const store = createMemoryStore();
+  await store.upsertRepo({ host: 'github.com', owner: 'megabyte0x', name: 'demo', safeAddress: payload.message.safe, chainId: 11155111, threshold: 1 });
+  await store.createApprovalRequest({
+    repoSlug: 'github.com/megabyte0x/demo', approvalId: 'appr_page', commitSha: payload.message.commitSha,
+    branch: 'main', payload, messageHash: hashApprovalPayload(payload), expiresAt: payload.message.expiresAt
+  });
+
+  const server = await listen(createApp({ store }));
+  try {
+    const html = await fetch(`${baseUrl(server)}/approve/appr_page`).then((r) => r.text());
+
+    assert.doesNotMatch(html, /innerHTML/);
+    assert.match(html, /createElement/);
+    assert.match(html, /textContent/);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
 test('GET /api/approvals/:approvalId returns payload needed by LocalSafe', async () => {
   const payload = samplePayload();
   const store = createMemoryStore();

@@ -48,21 +48,44 @@ export function createPgStore({ connectionString = process.env.SAFEGIT_DATABASE_
       return rows[0] || null;
     },
 
-    async createApprovalRequest({ repoSlug, approvalId, commitSha, branch, payload, messageHash, expiresAt }) {
-      const { rows } = await pool.query(
-        `INSERT INTO safegit_approval_requests (repo_slug, approval_id, commit_sha, branch, payload, message_hash, expires_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7)
-         ON CONFLICT (repo_slug, commit_sha) DO UPDATE SET
-           payload = EXCLUDED.payload,
-           message_hash = EXCLUDED.message_hash,
-           branch = EXCLUDED.branch,
-           expires_at = EXCLUDED.expires_at,
-           status = 'pending',
-           updated_at = now()
-         RETURNING repo_slug AS "repoSlug", approval_id AS "approvalId", commit_sha AS "commitSha", branch, payload, message_hash AS "messageHash", status, expires_at AS "expiresAt", created_at AS "createdAt"`,
-        [repoSlug, approvalId, commitSha, branch, JSON.stringify(payload), messageHash, expiresAt]
-      );
-      return { ...rows[0], signatures: [] };
+    async createApprovalRequest({ repoSlug, approvalId, commitSha, branch, payload, createdAt = payload?.message?.createdAt || new Date().toISOString(), messageHash, expiresAt }) {
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        const existing = await client.query(
+          `SELECT approval_id AS "approvalId"
+           FROM safegit_approval_requests
+           WHERE repo_slug = $1 AND commit_sha = $2
+           FOR UPDATE`,
+          [repoSlug, commitSha]
+        );
+        if (existing.rows[0]) {
+          await client.query('DELETE FROM safegit_signatures WHERE approval_id = $1', [existing.rows[0].approvalId]);
+        }
+
+        const { rows } = await client.query(
+          `INSERT INTO safegit_approval_requests (repo_slug, approval_id, commit_sha, branch, payload, message_hash, expires_at, created_at)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+           ON CONFLICT (repo_slug, commit_sha) DO UPDATE SET
+             approval_id = EXCLUDED.approval_id,
+             payload = EXCLUDED.payload,
+             message_hash = EXCLUDED.message_hash,
+             branch = EXCLUDED.branch,
+             expires_at = EXCLUDED.expires_at,
+             created_at = EXCLUDED.created_at,
+             status = 'pending',
+             updated_at = now()
+           RETURNING repo_slug AS "repoSlug", approval_id AS "approvalId", commit_sha AS "commitSha", branch, payload, message_hash AS "messageHash", status, expires_at AS "expiresAt", created_at AS "createdAt"`,
+          [repoSlug, approvalId, commitSha, branch, JSON.stringify(payload), messageHash, expiresAt, createdAt]
+        );
+        await client.query('COMMIT');
+        return { ...rows[0], signatures: [] };
+      } catch (error) {
+        await client.query('ROLLBACK');
+        throw error;
+      } finally {
+        client.release();
+      }
     },
 
     async getApproval(approvalId) {
