@@ -6,7 +6,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import YAML from 'yaml';
-import { createCliProgram, formatCliError, normalizeArgv } from '../src/cli.js';
+import { createCliProgram, formatCliError, normalizeArgv, runCli } from '../src/cli.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const cli = path.join(root, 'bin/safegit.js');
@@ -14,7 +14,7 @@ const serverCli = path.join(root, 'bin/safegit-server.js');
 const packageJson = JSON.parse(readFileSync(path.join(root, 'package.json'), 'utf8'));
 const compose = YAML.parse(readFileSync(path.join(root, 'docker-compose.yml'), 'utf8'));
 
-function runCli(args) {
+function runCliBin(args) {
   return spawnSync(process.execPath, [cli, ...args], {
     cwd: root,
     encoding: 'utf8'
@@ -30,7 +30,7 @@ function runServerCli(args) {
 }
 
 test('CLI accepts pnpm script separator before help option', () => {
-  const result = runCli(['--', '--help']);
+  const result = runCliBin(['--', '--help']);
 
   assert.equal(result.status, 0);
   assert.equal(result.stderr, '');
@@ -42,8 +42,137 @@ test('CLI program can be constructed without executing the bin entrypoint', () =
   const program = createCliProgram();
   const commands = program.commands.map((command) => command.name()).sort();
 
-  assert.deepEqual(commands, ['attest', 'doctor', 'env', 'init', 'migrate', 'request', 'status', 'verify']);
+  assert.deepEqual(commands, ['approval', 'attest', 'doctor', 'env', 'init', 'migrate', 'request', 'setup', 'sign', 'verify']);
   assert.deepEqual(normalizeArgv(['node', 'safegit', '--', '--help']), ['node', 'safegit', '--help']);
+});
+
+test('runCli delegates git-shaped commands to git with the original arguments', async () => {
+  const calls = [];
+  const exits = [];
+
+  for (const args of [
+    ['add', 'src/index.js'],
+    ['commit', '-m', 'wrap git commit'],
+    ['status', '--short'],
+    ['branch', '--show-current'],
+    ['init']
+  ]) {
+    await runCli({
+      argv: ['node', 'safegit', ...args],
+      runGitCommand: async (gitArgs) => {
+        calls.push(gitArgs);
+        return 0;
+      },
+      exit: (code) => exits.push(code),
+      stdout: () => {},
+      stderr: () => {}
+    });
+  }
+
+  assert.deepEqual(calls, [
+    ['add', 'src/index.js'],
+    ['commit', '-m', 'wrap git commit'],
+    ['status', '--short'],
+    ['branch', '--show-current'],
+    ['init']
+  ]);
+  assert.deepEqual(exits, []);
+});
+
+test('runCli exits with the git status when passthrough git command fails', async () => {
+  const exits = [];
+
+  await runCli({
+    argv: ['node', 'safegit', 'add', 'missing.txt'],
+    runGitCommand: async () => 128,
+    exit: (code) => exits.push(code),
+    stdout: () => {},
+    stderr: () => {}
+  });
+
+  assert.deepEqual(exits, [128]);
+});
+
+test('push verifies SafeGit approval before delegating to git push', async () => {
+  const gitCalls = [];
+  const storeCalls = [];
+  const store = {
+    async getApprovalByCommit(repoSlug, commitSha) {
+      storeCalls.push(['getApprovalByCommit', repoSlug, commitSha]);
+      return { approvalId: 'appr_push', status: 'approved' };
+    },
+    async close() {
+      storeCalls.push(['close']);
+    }
+  };
+
+  await runCli({
+    argv: ['node', 'safegit', 'push', 'origin', 'main'],
+    createStore: () => store,
+    getMetadata: () => ({
+      host: 'github.com',
+      owner: 'megabyte0x',
+      name: 'demo',
+      branch: 'main',
+      commitSha: 'a'.repeat(40),
+      treeSha: 'b'.repeat(40),
+      parentShas: [],
+      author: 'Megabyte <m@example.com>',
+      committer: 'Megabyte <m@example.com>'
+    }),
+    runGitCommand: async (args) => {
+      gitCalls.push(args);
+      return 0;
+    },
+    stdout: () => {},
+    stderr: () => {}
+  });
+
+  assert.deepEqual(storeCalls, [
+    ['getApprovalByCommit', 'github.com/megabyte0x/demo', '0x' + 'a'.repeat(40)],
+    ['close']
+  ]);
+  assert.deepEqual(gitCalls, [['push', 'origin', 'main']]);
+});
+
+test('push blocks git push when HEAD does not have approved SafeGit approval', async () => {
+  const gitCalls = [];
+  const errors = [];
+  const exits = [];
+  const store = {
+    async getApprovalByCommit() {
+      return { approvalId: 'appr_push', status: 'pending' };
+    },
+    async close() {}
+  };
+
+  await runCli({
+    argv: ['node', 'safegit', 'push'],
+    createStore: () => store,
+    getMetadata: () => ({
+      host: 'github.com',
+      owner: 'megabyte0x',
+      name: 'demo',
+      branch: 'main',
+      commitSha: 'a'.repeat(40),
+      treeSha: 'b'.repeat(40),
+      parentShas: [],
+      author: 'Megabyte <m@example.com>',
+      committer: 'Megabyte <m@example.com>'
+    }),
+    runGitCommand: async (args) => {
+      gitCalls.push(args);
+      return 0;
+    },
+    exit: (code) => exits.push(code),
+    stdout: () => {},
+    stderr: (line) => errors.push(line)
+  });
+
+  assert.deepEqual(gitCalls, []);
+  assert.deepEqual(exits, [1]);
+  assert.match(errors.join('\n'), /SafeGit verification failed/);
+  assert.match(errors.join('\n'), /pending/);
 });
 
 test('package exposes local CLI scripts for development without a global shim', () => {
@@ -263,4 +392,50 @@ test('request command persists only repo config fields before creating approval'
   assert.equal(calls[2][1].createdAt, '2026-05-17T08:00:00.000Z');
   assert.equal(calls[2][1].expiresAt, '2026-05-17T10:00:00.000Z');
   assert.match(stdout[0], /"approvalId": "appr_cli"/);
+});
+
+test('sign command creates an approval request for HEAD and returns the approval URL', async () => {
+  const stdout = [];
+  const store = {
+    async migrate() {},
+    async upsertRepo() {},
+    async createApprovalRequest() {},
+    async close() {}
+  };
+  const program = createCliProgram({
+    createStore: () => store,
+    loadConfig: () => ({
+      safe: {
+        address: '0x0000000000000000000000000000000000000001',
+        chainId: 11155111,
+        threshold: 2
+      }
+    }),
+    getMetadata: ({ ref }) => {
+      assert.equal(ref, 'HEAD');
+      return {
+        host: 'github.com',
+        owner: 'megabyte0x',
+        name: 'demo',
+        branch: 'main',
+        commitSha: 'a'.repeat(40),
+        treeSha: 'b'.repeat(40),
+        parentShas: [],
+        author: 'Megabyte <m@example.com>',
+        committer: 'Megabyte <m@example.com>'
+      };
+    },
+    newId: () => 'appr_sign',
+    now: () => new Date('2026-05-17T08:00:00.000Z'),
+    env: {
+      SAFEGIT_APPROVAL_BASE_URL: 'https://safe.example'
+    },
+    stdout: (line) => stdout.push(line)
+  });
+
+  await program.parseAsync(['node', 'safegit', 'sign']);
+
+  const output = JSON.parse(stdout[0]);
+  assert.equal(output.approvalId, 'appr_sign');
+  assert.equal(output.approvalUrl, 'https://safe.example/approve/appr_sign');
 });

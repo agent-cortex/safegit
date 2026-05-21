@@ -4,7 +4,7 @@ import net from 'node:net';
 import path from 'node:path';
 import { Command } from 'commander';
 import { getAddress } from 'viem';
-import { repoSlugFromRemote, git, getGitMetadata, normalizeHexSha } from './git.js';
+import { repoSlugFromRemote, git, getGitMetadata, normalizeHexSha, runGitPassthrough } from './git.js';
 import { newApprovalId } from './payload.js';
 import { writeConfig, requireConfig, CONFIG_FILE } from './config.js';
 import { createPgStore } from './store-pg.js';
@@ -13,6 +13,8 @@ import { createCommitApprovalRequest, repoSlugFromMetadata } from './approval-re
 
 const DEFAULT_DATABASE_URL = 'postgres://safegit:safegit_dev_password@127.0.0.1:15432/safegit';
 const DEFAULT_DOCTOR_TIMEOUT_MS = 1000;
+const DEFAULT_APPROVAL_BASE_URL = 'http://127.0.0.1:8787';
+const SAFEGIT_COMMANDS = new Set(['approval', 'attest', 'doctor', 'env', 'migrate', 'request', 'setup', 'sign', 'verify']);
 
 function hoursFromNow(hours, now = new Date()) {
   return new Date(now.getTime() + Number(hours) * 60 * 60 * 1000).toISOString();
@@ -21,6 +23,57 @@ function hoursFromNow(hours, now = new Date()) {
 export function normalizeArgv(argv) {
   if (argv[2] !== '--') return argv;
   return [...argv.slice(0, 2), ...argv.slice(3)];
+}
+
+function approvalBaseUrl(env) {
+  return String(env.SAFEGIT_APPROVAL_BASE_URL || DEFAULT_APPROVAL_BASE_URL).replace(/\/+$/, '');
+}
+
+function approvalUrl(env, approvalId) {
+  return `${approvalBaseUrl(env)}/approve/${approvalId}`;
+}
+
+function hasSafeGitInitOptions(args) {
+  return args.some((arg) => arg === '--safe' || arg.startsWith('--safe=') || arg === '--chain-id' || arg.startsWith('--chain-id='));
+}
+
+function shouldUseSafeGitCommand(args) {
+  if (args.length === 0) return true;
+  const command = args[0];
+  if (command === '--help' || command === '-h' || command === '--version' || command === '-V') return true;
+  if (command === 'init') return hasSafeGitInitOptions(args);
+  return SAFEGIT_COMMANDS.has(command);
+}
+
+async function withCreatedStore(createStore, fn) {
+  const store = createStore();
+  try {
+    return await fn(store);
+  } finally {
+    if (store?.close) await store.close();
+  }
+}
+
+async function getSafeGitApprovalForRef({ createStore, getMetadata, cwd, ref = 'HEAD' }) {
+  const meta = getMetadata({ cwd, ref });
+  const slug = repoSlugFromMetadata(meta);
+  const commitSha = normalizeHexSha(meta.commitSha);
+  return withCreatedStore(createStore, async (store) => ({
+    meta,
+    slug,
+    commitSha,
+    approval: await store.getApprovalByCommit(slug, commitSha)
+  }));
+}
+
+async function requireApprovedRef({ createStore, getMetadata, cwd, ref = 'HEAD', stdout, stderr }) {
+  const { slug, commitSha, approval } = await getSafeGitApprovalForRef({ createStore, getMetadata, cwd, ref });
+  if (!approval || approval.status !== 'approved') {
+    stderr(`SafeGit verification failed for ${slug}@${commitSha}: ${approval?.status || 'missing'}`);
+    return false;
+  }
+  stdout(`SafeGit verified ${slug}@${commitSha} via ${approval.approvalId}`);
+  return true;
 }
 
 function hasEnvKey(contents, key) {
@@ -211,6 +264,47 @@ export function createCliProgram({
     }
   }
 
+  async function registerRepo(opts) {
+    const remote = gitCommand(['remote', 'get-url', 'origin']);
+    const repo = repoSlugFromRemote(remote);
+    const safeAddress = getAddress(opts.safe);
+    const chainId = Number(opts.chainId);
+    const threshold = Number(opts.threshold);
+    if (!Number.isInteger(chainId) || chainId <= 0) throw new Error('chain-id must be a positive integer');
+    if (!Number.isInteger(threshold) || threshold <= 0) throw new Error('threshold must be a positive integer');
+
+    const config = { app: { name: 'SafeGit' }, repo, safe: { address: safeAddress, chainId, threshold } };
+    saveConfig(config);
+
+    await withStore(async (store) => {
+      await store.migrate();
+      await store.upsertRepo({ ...repo, safeAddress, chainId, threshold });
+    });
+
+    stdout(`Wrote ${CONFIG_FILE}`);
+    stdout(`Registered ${repo.host}/${repo.owner}/${repo.name} -> Safe ${safeAddress} (threshold ${threshold})`);
+  }
+
+  async function createApprovalForRef(opts) {
+    const config = loadConfig();
+    const meta = getMetadata({ cwd, ref: opts.ref });
+    const approvalId = newId(meta.commitSha);
+    const createdAt = now();
+    const expiresAt = hoursFromNow(opts.expiresHours, createdAt);
+
+    await withStore(async (store) => {
+      const result = await createCommitApprovalRequest({
+        store,
+        config,
+        metadata: meta,
+        approvalId,
+        createdAt,
+        expiresAt
+      });
+      stdout(JSON.stringify({ ...result, approvalUrl: approvalUrl(env, result.approvalId) }, null, 2));
+    });
+  }
+
   const program = new Command();
   program
     .name('safegit')
@@ -261,55 +355,31 @@ export function createCliProgram({
       }
     });
 
-  program.command('init')
+  program.command('setup')
     .description('Register this repo and write .safegit.yml')
     .requiredOption('--safe <address>', 'Safe smart account address')
     .requiredOption('--chain-id <id>', 'Safe chain ID')
     .option('--threshold <n>', 'required signatures', '1')
-    .action(async (opts) => {
-      const remote = gitCommand(['remote', 'get-url', 'origin']);
-      const repo = repoSlugFromRemote(remote);
-      const safeAddress = getAddress(opts.safe);
-      const chainId = Number(opts.chainId);
-      const threshold = Number(opts.threshold);
-      if (!Number.isInteger(chainId) || chainId <= 0) throw new Error('chain-id must be a positive integer');
-      if (!Number.isInteger(threshold) || threshold <= 0) throw new Error('threshold must be a positive integer');
+    .action(registerRepo);
 
-      const config = { app: { name: 'SafeGit' }, repo, safe: { address: safeAddress, chainId, threshold } };
-      saveConfig(config);
-
-      await withStore(async (store) => {
-        await store.migrate();
-        await store.upsertRepo({ ...repo, safeAddress, chainId, threshold });
-      });
-
-      stdout(`Wrote ${CONFIG_FILE}`);
-      stdout(`Registered ${repo.host}/${repo.owner}/${repo.name} -> Safe ${safeAddress} (threshold ${threshold})`);
-    });
+  program.command('init')
+    .description('Legacy alias for safegit setup when SafeGit options are provided; otherwise safegit init delegates to git init')
+    .requiredOption('--safe <address>', 'Safe smart account address')
+    .requiredOption('--chain-id <id>', 'Safe chain ID')
+    .option('--threshold <n>', 'required signatures', '1')
+    .action(registerRepo);
 
   program.command('request')
-    .description('Create/update a Safe approval request for a commit')
+    .description('Legacy alias for safegit sign')
     .option('--ref <ref>', 'git ref to approve', 'HEAD')
     .option('--expires-hours <hours>', 'approval expiry in hours', '24')
-    .action(async (opts) => {
-      const config = loadConfig();
-      const meta = getMetadata({ ref: opts.ref });
-      const approvalId = newId(meta.commitSha);
-      const createdAt = now();
-      const expiresAt = hoursFromNow(opts.expiresHours, createdAt);
+    .action(createApprovalForRef);
 
-      await withStore(async (store) => {
-        const result = await createCommitApprovalRequest({
-          store,
-          config,
-          metadata: meta,
-          approvalId,
-          createdAt,
-          expiresAt
-        });
-        stdout(JSON.stringify(result, null, 2));
-      });
-    });
+  program.command('sign')
+    .description('Create/update a Safe approval request for HEAD')
+    .option('--ref <ref>', 'git ref to approve', 'HEAD')
+    .option('--expires-hours <hours>', 'approval expiry in hours', '24')
+    .action(createApprovalForRef);
 
   program.command('attest')
     .description('Attach a Safe owner signature to an approval request')
@@ -328,47 +398,35 @@ export function createCliProgram({
       });
     });
 
-  program.command('status')
-    .description('Show Safe approval status for a commit')
+  const approval = program.command('approval')
+    .description('Inspect SafeGit approval state');
+
+  approval.command('status')
+    .description('Show SafeGit approval status for a commit')
     .option('--ref <ref>', 'git ref to inspect', 'HEAD')
     .action(async (opts) => {
-      const meta = getMetadata({ ref: opts.ref });
-      const slug = repoSlugFromMetadata(meta);
-      const commitSha = normalizeHexSha(meta.commitSha);
-      await withStore(async (store) => {
-        const approval = await store.getApprovalByCommit(slug, commitSha);
-        if (!approval) {
-          stdout(JSON.stringify({ repoSlug: slug, commitSha, status: 'missing' }, null, 2));
-          return;
-        }
-        stdout(JSON.stringify({
-          approvalId: approval.approvalId,
-          repoSlug: slug,
-          commitSha,
-          branch: approval.branch,
-          status: approval.status,
-          signatures: approval.signatures.map((sig) => sig.signer),
-          messageHash: approval.messageHash
-        }, null, 2));
-      });
+      const { slug, commitSha, approval } = await getSafeGitApprovalForRef({ createStore, getMetadata, cwd, ref: opts.ref });
+      if (!approval) {
+        stdout(JSON.stringify({ repoSlug: slug, commitSha, status: 'missing' }, null, 2));
+        return;
+      }
+      stdout(JSON.stringify({
+        approvalId: approval.approvalId,
+        repoSlug: slug,
+        commitSha,
+        branch: approval.branch,
+        status: approval.status,
+        signatures: approval.signatures.map((sig) => sig.signer),
+        messageHash: approval.messageHash
+      }, null, 2));
     });
 
   program.command('verify')
     .description('Exit 0 only if commit has approved SafeGit attestation')
     .option('--ref <ref>', 'git ref to inspect', 'HEAD')
     .action(async (opts) => {
-      const meta = getMetadata({ ref: opts.ref });
-      const slug = repoSlugFromMetadata(meta);
-      const commitSha = normalizeHexSha(meta.commitSha);
-      await withStore(async (store) => {
-        const approval = await store.getApprovalByCommit(slug, commitSha);
-        if (!approval || approval.status !== 'approved') {
-          stderr(`SafeGit verification failed for ${slug}@${commitSha}: ${approval?.status || 'missing'}`);
-          setExitCode(1);
-          return;
-        }
-        stdout(`SafeGit verified ${slug}@${commitSha} via ${approval.approvalId}`);
-      });
+      const ok = await requireApprovedRef({ createStore, getMetadata, cwd, ref: opts.ref, stdout, stderr });
+      if (!ok) setExitCode(1);
     });
 
   return program;
@@ -382,9 +440,57 @@ export function formatCliError(error) {
   return error.message || String(error);
 }
 
-export async function runCli({ argv = process.argv, exit = process.exit, stderr = console.error } = {}) {
+export async function runCli({
+  argv = process.argv,
+  exit = process.exit,
+  stdout = console.log,
+  stderr = console.error,
+  cwd = process.cwd(),
+  env = process.env,
+  createStore = createPgStore,
+  gitCommand = git,
+  getMetadata = getGitMetadata,
+  loadConfig = requireConfig,
+  saveConfig = writeConfig,
+  lookupHost = (host) => dns.lookup(host),
+  connectTcp = defaultConnectTcp,
+  now = () => new Date(),
+  newId = newApprovalId,
+  runGitCommand = runGitPassthrough
+} = {}) {
+  const normalizedArgv = normalizeArgv(argv);
+  const args = normalizedArgv.slice(2);
+
   try {
-    await createCliProgram({ stderr }).parseAsync(normalizeArgv(argv));
+    if (shouldUseSafeGitCommand(args)) {
+      await createCliProgram({
+        createStore,
+        gitCommand,
+        getMetadata,
+        loadConfig,
+        saveConfig,
+        cwd,
+        env,
+        lookupHost,
+        connectTcp,
+        now,
+        newId,
+        stdout,
+        stderr
+      }).parseAsync(normalizedArgv);
+      return;
+    }
+
+    if (args[0] === 'push') {
+      const ok = await requireApprovedRef({ createStore, getMetadata, cwd, ref: 'HEAD', stdout, stderr });
+      if (!ok) {
+        exit(1);
+        return;
+      }
+    }
+
+    const status = await runGitCommand(args, { cwd, env });
+    if (status !== 0) exit(status || 1);
   } catch (error) {
     stderr(formatCliError(error));
     exit(1);

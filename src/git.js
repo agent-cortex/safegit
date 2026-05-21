@@ -1,4 +1,4 @@
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 
 export function normalizeHexSha(sha) {
   const stripped = String(sha || '').trim().replace(/^0x/i, '');
@@ -22,6 +22,14 @@ export function repoSlugFromRemote(remote) {
 
 export function git(args, cwd = process.cwd()) {
   return execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
+}
+
+export function runGitPassthrough(args, { cwd = process.cwd(), env = process.env, stdio = 'inherit' } = {}) {
+  return new Promise((resolve, reject) => {
+    const child = spawn('git', args, { cwd, env, stdio });
+    child.once('error', reject);
+    child.once('exit', (code) => resolve(code ?? 1));
+  });
 }
 
 export function getGitMetadata({ cwd = process.cwd(), ref = 'HEAD' } = {}) {

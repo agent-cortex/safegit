@@ -8,7 +8,8 @@ It creates an EIP-712 `GitCommitApproval` payload for a commit, collects Safe ow
 
 ## What is included
 
-- CLI: `safegit env`, `doctor`, `migrate`, `init`, `request`, `attest`, `status`, `verify`
+- Git wrapper CLI: `safegit add`, `commit`, `status`, `push`, and other Git commands pass through to `git`
+- SafeGit overlay commands: `safegit setup`, `sign`, `approval status`, `verify`, plus legacy `request` and `attest`
 - HTTP API for approval retrieval and signature submission
 - Built-in browser approval page at `/approve/:approvalId`
 - Postgres shared state for repos, approval requests, and signatures
@@ -22,13 +23,14 @@ It creates an EIP-712 `GitCommitApproval` payload for a commit, collects Safe ow
 ## Architecture
 
 ```text
-Developer CLI
+Developer runs safegit as a git wrapper
+  -> safegit add / commit delegate to git
+  -> safegit sign creates a commit approval request
   -> Postgres shared approval state
   -> SafeGit API + approval page
   -> Safe owners sign EIP-712 typed data
-  -> optional live Safe owner/threshold validation
-  -> GitHub Action runs safegit verify
-  -> branch protection requires Safe Verified
+  -> safegit push verifies approval, then delegates to git push
+  -> GitHub Action can also run safegit verify
 ```
 
 ## Requirements
@@ -129,7 +131,7 @@ safegit migrate
 ```bash
 cd /path/to/your/repo
 safegit env
-safegit init \
+safegit setup \
   --safe 0xYourSafeAddress \
   --chain-id 11155111 \
   --threshold 2
@@ -137,13 +139,24 @@ safegit init \
 
 This writes `.safegit.yml` and stores the repo → Safe mapping in Postgres.
 
-### 3. Create an approval request for a commit
+`safegit init --safe ...` remains as a legacy alias for setup. Plain `safegit init` delegates to `git init`.
+
+### 3. Stage and commit exactly like Git
 
 ```bash
-safegit request --ref HEAD
+safegit add path/to/file
+safegit commit -m "describe the protected change"
 ```
 
-This creates a `GitCommitApproval` EIP-712 payload containing:
+`safegit add`, `safegit commit`, `safegit status`, and other Git-shaped commands pass their original arguments to `git`. SafeGit does not reimplement Git's index, pathspec, hooks, editor, or transport behavior.
+
+### 4. Create an approval request for the commit
+
+```bash
+safegit sign
+```
+
+This creates a `GitCommitApproval` EIP-712 payload for `HEAD` containing:
 
 - repo host, owner, and name
 - branch
@@ -155,13 +168,18 @@ This creates a `GitCommitApproval` EIP-712 payload containing:
 - approval ID
 - creation and expiry timestamps
 
-The command prints an `approvalId` like:
+The command prints an `approvalId` and `approvalUrl` like:
 
 ```text
-appr_5f4074bfbf53
+{
+  "approvalId": "appr_5f4074bfbf53",
+  "approvalUrl": "http://127.0.0.1:8787/approve/appr_5f4074bfbf53"
+}
 ```
 
-### 4. Open the approval page
+The legacy `safegit request --ref HEAD` command is still available, but `safegit sign` is the normal wrapper flow.
+
+### 5. Open the approval page
 
 ```text
 http://127.0.0.1:8787/approve/<approvalId>
@@ -175,11 +193,13 @@ The page:
 4. posts `{ signer, signature }` to the SafeGit API
 5. marks the approval `approved` after the configured threshold is reached
 
-### 5. Check status
+### 6. Check approval status
 
 ```bash
-safegit status --ref HEAD
+safegit approval status --ref HEAD
 ```
+
+`safegit status` delegates to `git status`.
 
 Before enough signatures:
 
@@ -197,7 +217,15 @@ After threshold:
 }
 ```
 
-### 6. Enforce approval in CI
+### 7. Push through the SafeGit wrapper
+
+```bash
+safegit push
+```
+
+`safegit push` first checks that `HEAD` has an approved SafeGit approval. If approval is missing or pending, it exits before running `git push`. Once approved, it delegates to `git push` with the original arguments.
+
+### 8. Enforce approval in CI
 
 ```bash
 safegit verify --ref HEAD
