@@ -34,7 +34,10 @@
     "preinstall": "node ./scripts/only-pnpm.js",
     "test": "node --test",
     "start": "node ./bin/safegit.js",
-    "server": "node ./bin/safegit-server.js"
+    "safegit": "node ./bin/safegit.js",
+    "server": "node ./bin/safegit-server.js",
+    "safegit:server": "node ./bin/safegit-server.js",
+    "link:global": "pnpm link --global ."
   },
   "dependencies": {
     "commander": "^12.1.0",

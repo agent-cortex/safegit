@@ -8,7 +8,7 @@ It creates an EIP-712 `GitCommitApproval` payload for a commit, collects Safe ow
 
 ## What is included
 
-- CLI: `safegit migrate`, `init`, `request`, `attest`, `status`, `verify`
+- CLI: `safegit env`, `doctor`, `migrate`, `init`, `request`, `attest`, `status`, `verify`
 - HTTP API for approval retrieval and signature submission
 - Built-in browser approval page at `/approve/:approvalId`
 - Postgres shared state for repos, approval requests, and signatures
@@ -44,16 +44,39 @@ Developer CLI
 
 SafeGit is pnpm-only.
 
+Run these commands from the SafeGit CLI package directory, the directory that contains `package.json` and `bin/safegit.js`.
+
 ```bash
 pnpm install
-pnpm link --global
 ```
 
-Check the CLI:
+Check the local entrypoints before linking globally:
+
+```bash
+pnpm safegit -- --help
+pnpm run safegit:server -- --help
+```
+
+Link the CLI globally when you want to run `safegit init` from arbitrary target repos:
+
+```bash
+pnpm link:global
+hash -r
+```
+
+Check the global shims:
 
 ```bash
 safegit --help
 safegit-server --help
+```
+
+If `safegit migrate` or `safegit init` fails with `Cannot find module '.../bin/safegit.js'`, the global shim was linked from the wrong directory or an older checkout. Re-run `pnpm link:global` from the CLI package directory and clear the shell command cache with `hash -r`. On pnpm 11+, the underlying command is `pnpm link --global .`; the trailing `.` is required.
+
+Without a global link, use the bin path directly from any target repo:
+
+```bash
+node /absolute/path/to/safegit/bin/safegit.js init --safe 0xYourSafeAddress --chain-id 11155111 --threshold 2
 ```
 
 ## Run local API + Postgres
@@ -68,13 +91,18 @@ The API starts at:
 http://127.0.0.1:8787
 ```
 
+Postgres is published on the host at `127.0.0.1:15432` by default so it does not collide with an existing developer-machine Postgres on `5432`. Override the host port with `SAFEGIT_POSTGRES_HOST_PORT` before running Docker Compose.
+
 The API server runs migrations automatically on startup. Use `safegit migrate` directly for manual setup, hosted Postgres, CI/CD migrations, or future schema upgrades.
 
 For CLI commands in another shell:
 
 ```bash
-export SAFEGIT_DATABASE_URL='postgres://safegit:safegit_dev_password@127.0.0.1:5432/safegit'
+safegit env
+safegit doctor
 ```
+
+This creates `.env` in the current directory with the Docker Compose database URL, `postgres://safegit:safegit_dev_password@127.0.0.1:15432/safegit`, if `SAFEGIT_DATABASE_URL` is missing. `safegit doctor` validates the URL, DNS, and TCP connectivity. Use `safegit env --database-url 'postgres://USER:PASSWORD@HOST:5432/DB'` for a hosted or manually managed database. If an existing `.env` contains a stale or malformed value, use `safegit env --force`.
 
 Optional live Safe validation:
 
@@ -91,7 +119,8 @@ When `SAFEGIT_RPC_URL` is set on the API server, submitted signatures are checke
 If you are using Docker Compose, the API does this automatically. If you are using a manually managed database, run:
 
 ```bash
-export SAFEGIT_DATABASE_URL='postgres://USER:PASSWORD@HOST:5432/DB'
+safegit env --database-url 'postgres://USER:PASSWORD@HOST:5432/DB'
+safegit doctor
 safegit migrate
 ```
 
@@ -99,6 +128,7 @@ safegit migrate
 
 ```bash
 cd /path/to/your/repo
+safegit env
 safegit init \
   --safe 0xYourSafeAddress \
   --chain-id 11155111 \

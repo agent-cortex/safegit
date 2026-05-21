@@ -1,17 +1,31 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
-import { createCliProgram, normalizeArgv } from '../src/cli.js';
+import YAML from 'yaml';
+import { createCliProgram, formatCliError, normalizeArgv } from '../src/cli.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const cli = path.join(root, 'bin/safegit.js');
+const serverCli = path.join(root, 'bin/safegit-server.js');
+const packageJson = JSON.parse(readFileSync(path.join(root, 'package.json'), 'utf8'));
+const compose = YAML.parse(readFileSync(path.join(root, 'docker-compose.yml'), 'utf8'));
 
 function runCli(args) {
   return spawnSync(process.execPath, [cli, ...args], {
     cwd: root,
     encoding: 'utf8'
+  });
+}
+
+function runServerCli(args) {
+  return spawnSync(process.execPath, [serverCli, ...args], {
+    cwd: root,
+    encoding: 'utf8',
+    timeout: 2000
   });
 }
 
@@ -28,8 +42,169 @@ test('CLI program can be constructed without executing the bin entrypoint', () =
   const program = createCliProgram();
   const commands = program.commands.map((command) => command.name()).sort();
 
-  assert.deepEqual(commands, ['attest', 'init', 'migrate', 'request', 'status', 'verify']);
+  assert.deepEqual(commands, ['attest', 'doctor', 'env', 'init', 'migrate', 'request', 'status', 'verify']);
   assert.deepEqual(normalizeArgv(['node', 'safegit', '--', '--help']), ['node', 'safegit', '--help']);
+});
+
+test('package exposes local CLI scripts for development without a global shim', () => {
+  assert.equal(packageJson.scripts.safegit, 'node ./bin/safegit.js');
+  assert.equal(packageJson.scripts['safegit:server'], 'node ./bin/safegit-server.js');
+  assert.equal(packageJson.scripts['link:global'], 'pnpm link --global .');
+});
+
+test('server entrypoint prints help without opening the database or listener', () => {
+  const result = runServerCli(['--help']);
+
+  assert.equal(result.status, 0);
+  assert.equal(result.stderr, '');
+  assert.match(result.stdout, /Usage: safegit-server/);
+  assert.match(result.stdout, /SafeGit API server/);
+});
+
+test('env command writes SAFEGIT_DATABASE_URL when it is missing', async () => {
+  const cwd = mkdtempSync(path.join(tmpdir(), 'safegit-env-'));
+  const stdout = [];
+  try {
+    const program = createCliProgram({
+      cwd,
+      env: {},
+      stdout: (line) => stdout.push(line)
+    });
+
+    await program.parseAsync(['node', 'safegit', 'env', '--database-url', 'postgres://example']);
+
+    assert.equal(readFileSync(path.join(cwd, '.env'), 'utf8'), 'SAFEGIT_DATABASE_URL=postgres://example\n');
+    assert.match(stdout[0], /Added SAFEGIT_DATABASE_URL to .env/);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test('env command defaults to the non-conflicting Docker Compose host port', async () => {
+  const cwd = mkdtempSync(path.join(tmpdir(), 'safegit-env-'));
+  try {
+    const program = createCliProgram({
+      cwd,
+      env: {},
+      stdout: () => {}
+    });
+
+    await program.parseAsync(['node', 'safegit', 'env']);
+
+    assert.equal(
+      readFileSync(path.join(cwd, '.env'), 'utf8'),
+      'SAFEGIT_DATABASE_URL=postgres://safegit:safegit_dev_password@127.0.0.1:15432/safegit\n'
+    );
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test('env command leaves existing SAFEGIT_DATABASE_URL unchanged', async () => {
+  const cwd = mkdtempSync(path.join(tmpdir(), 'safegit-env-'));
+  const stdout = [];
+  try {
+    writeFileSync(path.join(cwd, '.env'), 'SAFEGIT_DATABASE_URL=postgres://existing\nSAFEGIT_PORT=8787\n', 'utf8');
+    const program = createCliProgram({
+      cwd,
+      env: {},
+      stdout: (line) => stdout.push(line)
+    });
+
+    await program.parseAsync(['node', 'safegit', 'env', '--database-url', 'postgres://new']);
+
+    assert.equal(readFileSync(path.join(cwd, '.env'), 'utf8'), 'SAFEGIT_DATABASE_URL=postgres://existing\nSAFEGIT_PORT=8787\n');
+    assert.match(stdout[0], /SAFEGIT_DATABASE_URL already exists in .env/);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test('env command can replace an existing SAFEGIT_DATABASE_URL in the env file', async () => {
+  const cwd = mkdtempSync(path.join(tmpdir(), 'safegit-env-'));
+  const stdout = [];
+  try {
+    writeFileSync(path.join(cwd, '.env'), 'SAFEGIT_DATABASE_URL=postgress://test:test@local:5432/DB\nSAFEGIT_PORT=8787\n', 'utf8');
+    const program = createCliProgram({
+      cwd,
+      env: {
+        SAFEGIT_DATABASE_URL: 'postgress://test:test@local:5432/DB'
+      },
+      stdout: (line) => stdout.push(line)
+    });
+
+    await program.parseAsync(['node', 'safegit', 'env', '--force']);
+
+    assert.equal(
+      readFileSync(path.join(cwd, '.env'), 'utf8'),
+      'SAFEGIT_DATABASE_URL=postgres://safegit:safegit_dev_password@127.0.0.1:15432/safegit\nSAFEGIT_PORT=8787\n'
+    );
+    assert.match(stdout[0], /Updated SAFEGIT_DATABASE_URL in .env/);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test('Docker Compose publishes Postgres on the same non-conflicting host port the CLI writes', () => {
+  assert.deepEqual(compose.services.postgres.ports, ['${SAFEGIT_POSTGRES_HOST_PORT:-15432}:5432']);
+});
+
+test('doctor reports malformed database URLs and unresolved hosts with actionable output', async () => {
+  const stdout = [];
+  const exitCodes = [];
+  const program = createCliProgram({
+    env: {
+      SAFEGIT_DATABASE_URL: 'postgress://test:test@local:5432/DB'
+    },
+    lookupHost: async () => {
+      const error = new Error('getaddrinfo ENOTFOUND local');
+      error.code = 'ENOTFOUND';
+      throw error;
+    },
+    connectTcp: async () => {},
+    stdout: (line) => stdout.push(line),
+    setExitCode: (code) => exitCodes.push(code)
+  });
+
+  await program.parseAsync(['node', 'safegit', 'doctor']);
+
+  const output = stdout.join('\n');
+  assert.equal(exitCodes.at(-1), 1);
+  assert.match(output, /SAFEGIT_DATABASE_URL must use postgres:\/\/ or postgresql:\/\//);
+  assert.match(output, /Database host "local" could not be resolved/);
+  assert.match(output, /Run `safegit env --database-url/);
+});
+
+test('doctor confirms a reachable database URL', async () => {
+  const calls = [];
+  const stdout = [];
+  const program = createCliProgram({
+    env: {
+      SAFEGIT_DATABASE_URL: 'postgres://safegit:safegit_dev_password@127.0.0.1:15432/safegit'
+    },
+    lookupHost: async (host) => calls.push(['lookup', host]),
+    connectTcp: async (input) => calls.push(['connect', input.host, input.port]),
+    stdout: (line) => stdout.push(line)
+  });
+
+  await program.parseAsync(['node', 'safegit', 'doctor']);
+
+  assert.deepEqual(calls, [
+    ['lookup', '127.0.0.1'],
+    ['connect', '127.0.0.1', 15432]
+  ]);
+  assert.match(stdout.join('\n'), /SafeGit doctor passed/);
+});
+
+test('CLI error formatting points database DNS failures at doctor', () => {
+  const error = new Error('getaddrinfo ENOTFOUND local');
+  error.code = 'ENOTFOUND';
+  error.hostname = 'local';
+
+  assert.equal(
+    formatCliError(error),
+    'Database host "local" could not be resolved. Run safegit doctor to inspect SAFEGIT_DATABASE_URL.'
+  );
 });
 
 test('request command persists only repo config fields before creating approval', async () => {
